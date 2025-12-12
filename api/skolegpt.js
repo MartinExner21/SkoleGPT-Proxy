@@ -36,7 +36,6 @@ export default async function handler(req, res) {
   }
 
   const { userContent } = req.body || {};
-
   if (!userContent || !userContent.trim()) {
     return res.status(400).json({ error: "Missing 'userContent' in body" });
   }
@@ -46,14 +45,17 @@ export default async function handler(req, res) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`
+        "Authorization": `Bearer ${apiKey}`,
+        "Accept": "text/event-stream"
       },
       body: JSON.stringify({
         messages: [
           { role: "system", content: INIT_PROMPT },
           { role: "user", content: userContent }
         ],
-        stream: false,          // vi gør det simpelt: ikke streaming
+        // VIGTIGT: vi streamer stadig fra SkoleGPT,
+        // men vi samler det til én streng her på serveren
+        stream: true,
         model: "skolegpt-v3",
         temperature: 0.7,
         top_p: 0.95,
@@ -71,20 +73,45 @@ export default async function handler(req, res) {
       });
     }
 
-    const data = await response.json();
-    const answer =
-      data?.choices?.[0]?.message?.content ??
-      data?.choices?.[0]?.delta?.content ??
-      "";
+    const raw = await response.text();
+    // Hvis du vil debugge i Vercel-loggene:
+    // console.log("RAW SSE:", raw.slice(0, 800));
 
-    if (!answer) {
-      return res.status(500).json({ error: "Empty answer from SkoleGPT" });
+    let fullText = "";
+    const lines = raw.split(/\r?\n/);
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+
+      const dataPart = trimmed.slice("data:".length).trim();
+      if (!dataPart || dataPart === "[DONE]") continue;
+
+      try {
+        const obj = JSON.parse(dataPart);
+        const choice = obj?.choices?.[0];
+        const piece =
+          choice?.delta?.content ??
+          choice?.message?.content ??
+          choice?.text ??
+          "";
+        if (piece) fullText += piece;
+      } catch (e) {
+        // hvis en enkelt linje ikke kan parses, skipper vi den bare
+        // console.warn("Kunne ikke parse SSE-linje:", trimmed, e);
+      }
     }
 
-    return res.status(200).json({ answer });
+    if (!fullText.trim()) {
+      return res.status(500).json({
+        error: "Empty answer from SkoleGPT (after SSE parse)",
+        rawPreview: raw.slice(0, 500)
+      });
+    }
+
+    return res.status(200).json({ answer: fullText });
   } catch (err) {
     console.error("SkoleGPT proxy error:", err);
     return res.status(500).json({ error: "Internal SkoleGPT proxy error" });
   }
 }
-
