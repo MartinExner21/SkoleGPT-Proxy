@@ -6,11 +6,9 @@ const INIT_PROMPT = `Du er SkoleGPT og skal hjælpe en ordblind elev eller vokse
 4) Behold meningen.
 5) Tal direkte til brugeren.
 
-VIGTIGT:
-- Start ikke ens hver gang. Variér let.
-Svar altid på dansk.`;
+VIGTIGT: Variér dine åbningssætninger lidt hver gang. Svar altid på dansk.`;
 
-function setCors(res) {
+function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -18,8 +16,7 @@ function setCors(res) {
 }
 
 export default async function handler(req, res) {
-  setCors(res);
-
+  cors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -27,9 +24,7 @@ export default async function handler(req, res) {
   if (!apiKey) return res.status(500).json({ error: "Missing SKOLEGPT_API_KEY on server" });
 
   const { userContent } = req.body || {};
-  if (!userContent || !userContent.trim()) {
-    return res.status(400).json({ error: "Missing 'userContent' in body" });
-  }
+  if (!userContent || !userContent.trim()) return res.status(400).json({ error: "Missing userContent" });
 
   try {
     const r = await fetch("https://llm.dbc.dk/v1/chat/completions", {
@@ -53,11 +48,7 @@ export default async function handler(req, res) {
 
     if (!r.ok) {
       const details = await r.text().catch(() => "");
-      return res.status(502).json({
-        error: "SkoleGPT upstream error",
-        status: r.status,
-        details: details.slice(0, 2000)
-      });
+      return res.status(502).json({ error: "SkoleGPT upstream error", status: r.status, details: details.slice(0, 2000) });
     }
 
     const raw = await r.text();
@@ -66,31 +57,20 @@ export default async function handler(req, res) {
     for (const line of raw.split(/\r?\n/)) {
       const t = line.trim();
       if (!t.startsWith("data:")) continue;
-      const dataPart = t.slice(5).trim();
-      if (!dataPart || dataPart === "[DONE]") continue;
+      const part = t.slice(5).trim();
+      if (!part || part === "[DONE]") continue;
 
       try {
-        const obj = JSON.parse(dataPart);
+        const obj = JSON.parse(part);
         const c = obj?.choices?.[0];
-        const piece = c?.delta?.content ?? c?.message?.content ?? c?.text ?? "";
+        const piece = c?.delta?.content ?? c?.message?.content ?? "";
         if (piece) full += piece;
-      } catch {
-        // skip unparseable lines
-      }
+      } catch {}
     }
 
-    if (!full.trim()) {
-      return res.status(500).json({
-        error: "Empty answer from SkoleGPT (after SSE parse)",
-        rawPreview: raw.slice(0, 800)
-      });
-    }
-
+    if (!full.trim()) return res.status(500).json({ error: "Empty answer from SkoleGPT", rawPreview: raw.slice(0, 800) });
     return res.status(200).json({ answer: full });
   } catch (e) {
-    return res.status(500).json({
-      error: "Internal proxy error",
-      message: String(e?.message || e)
-    });
+    return res.status(500).json({ error: "Internal proxy error", message: String(e?.message || e) });
   }
 }
