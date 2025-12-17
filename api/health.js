@@ -11,7 +11,6 @@ export default function handler(req, res) {
     ok,
     has_SKOLEGPT_API_KEY: Boolean(process.env.SKOLEGPT_API_KEY),
     has_ELEVENLABS_API_KEY: Boolean(process.env.ELEVENLABS_API_KEY),
-    has_ELEVENLABS_VOICE_ID: Boolean(process.env.ELEVENLABS_VOICE_ID),
-    timestamp: new Date().toISOString()
+    has_ELEVENLABS_VOICE_ID: Boolean(process.env.ELEVENLABS_VOICE_ID)
   });
 }
