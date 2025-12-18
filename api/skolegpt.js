@@ -1,22 +1,27 @@
+// api/skolegpt.js  (STREAMING proxy -> SSE)
+// Returnerer text/event-stream med deltas:  data: {"delta":"..."}  og til sidst data: [DONE]
+
 const INIT_PROMPT = `Du er SkoleGPT og skal hjælpe en ordblind elev eller voksen med at forstå en tekst eller svare på et spørgsmål.
 
-1) Forklar i enkelt, mundtligt dansk.
-2) Korte sætninger.
-3) Forklar svære ord.
-4) Behold meningen.
+Når du får et spørgsmål samt evt. markeret tekst og/eller hele sidens indhold:
+1) Forklar i et enkelt, mundtligt dansk sprog.
+2) Brug korte og tydelige sætninger.
+3) Undgå svære fagord, eller forklar dem.
+4) Behold hovedbetydningen.
 5) Tal direkte til brugeren.
 
-VIGTIGT: Variér dine åbningssætninger lidt hver gang. Svar altid på dansk.`;
+VIGTIGT:
+- Start ALDRIG to svar på samme måde.
+- Variér åbningssætningen med små venlige twists, men hold sproget neutralt og let at forstå.
+- Svar som standard kort: 4-8 korte linjer. Afslut evt. med "Vil du have en mere detaljeret forklaring?"
+Svar altid på dansk.`;
 
-function cors(res) {
+export default async function handler(req, res) {
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Cache-Control", "no-store");
-}
 
-export default async function handler(req, res) {
-  cors(res);
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -24,10 +29,12 @@ export default async function handler(req, res) {
   if (!apiKey) return res.status(500).json({ error: "Missing SKOLEGPT_API_KEY on server" });
 
   const { userContent } = req.body || {};
-  if (!userContent || !userContent.trim()) return res.status(400).json({ error: "Missing userContent" });
+  if (!userContent || !String(userContent).trim()) {
+    return res.status(400).json({ error: "Missing 'userContent' in body" });
+  }
 
   try {
-    const r = await fetch("https://llm.dbc.dk/v1/chat/completions", {
+    const upstream = await fetch("https://llm.dbc.dk/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -37,40 +44,96 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         messages: [
           { role: "system", content: INIT_PROMPT },
-          { role: "user", content: userContent }
+          { role: "user", content: String(userContent) }
         ],
         stream: true,
         model: "skolegpt-v3",
-        temperature: 0.7,
-        top_p: 0.95
+        temperature: 0.6,
+        top_p: 0.9,
+        presence_penalty: 0,
+        frequency_penalty: 0
       })
     });
 
-    if (!r.ok) {
-      const details = await r.text().catch(() => "");
-      return res.status(502).json({ error: "SkoleGPT upstream error", status: r.status, details: details.slice(0, 2000) });
+    if (!upstream.ok || !upstream.body) {
+      const txt = await upstream.text().catch(() => "");
+      return res.status(502).json({
+        error: "SkoleGPT upstream error",
+        status: upstream.status,
+        details: txt
+      });
     }
 
-    const raw = await r.text();
-    let full = "";
+    // SSE response til klienten
+    res.statusCode = 200;
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
 
-    for (const line of raw.split(/\r?\n/)) {
-      const t = line.trim();
-      if (!t.startsWith("data:")) continue;
-      const part = t.slice(5).trim();
-      if (!part || part === "[DONE]") continue;
+    // Helper: skriv SSE-linje
+    const writeDelta = (delta) => {
+      // JSON-escape via stringify
+      res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+    };
 
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // upstream kommer som SSE-linjer; vi splitter på newline
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+
+        const dataPart = trimmed.slice("data:".length).trim();
+        if (!dataPart) continue;
+
+        if (dataPart === "[DONE]") {
+          res.write(`data: [DONE]\n\n`);
+          res.end();
+          return;
+        }
+
+        // parse upstream chunk JSON
+        try {
+          const obj = JSON.parse(dataPart);
+          const choice = obj?.choices?.[0];
+          const piece =
+            choice?.delta?.content ??
+            choice?.message?.content ??
+            "";
+
+          if (piece) writeDelta(piece);
+        } catch {
+          // ignore parse fejl
+        }
+      }
+    }
+
+    // fallback hvis upstream sluttede uden [DONE]
+    res.write(`data: [DONE]\n\n`);
+    res.end();
+  } catch (err) {
+    console.error("SkoleGPT streaming proxy error:", err);
+    try {
+      res.status(500).json({ error: "Internal SkoleGPT proxy error" });
+    } catch {
+      // hvis headers allerede sendt
       try {
-        const obj = JSON.parse(part);
-        const c = obj?.choices?.[0];
-        const piece = c?.delta?.content ?? c?.message?.content ?? "";
-        if (piece) full += piece;
+        res.write(`data: ${JSON.stringify({ error: "Internal error" })}\n\n`);
+        res.write(`data: [DONE]\n\n`);
+        res.end();
       } catch {}
     }
-
-    if (!full.trim()) return res.status(500).json({ error: "Empty answer from SkoleGPT", rawPreview: raw.slice(0, 800) });
-    return res.status(200).json({ answer: full });
-  } catch (e) {
-    return res.status(500).json({ error: "Internal proxy error", message: String(e?.message || e) });
   }
 }
