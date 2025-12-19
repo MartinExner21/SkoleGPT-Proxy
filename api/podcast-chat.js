@@ -1,4 +1,42 @@
-// /api/podcast-chat.js  (Vercel) — ROBUST + FAIL LOUD
+// /api/podcast-chat.js  (Vercel) — NO fetch() (uses https.request)
+
+import https from "https";
+import { URL } from "url";
+
+function postJson(urlString, headers, bodyObj) {
+  const url = new URL(urlString);
+  const body = JSON.stringify(bodyObj);
+
+  const options = {
+    method: "POST",
+    hostname: url.hostname,
+    path: url.pathname + (url.search || ""),
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(body),
+      ...headers,
+    },
+  };
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, (res) => {
+      let data = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          text: data,
+        });
+      });
+    });
+
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -17,36 +55,27 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Missing env SKOLEGPT_API_KEY" });
     }
 
-    const upstream = await fetch("https://api.skolegpt.dk/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        messages,
-        temperature,
-        max_tokens,
-      }),
-    });
+    const upstream = await postJson(
+      "https://api.skolegpt.dk/v1/chat/completions",
+      { Authorization: `Bearer ${apiKey}` },
+      { messages, temperature, max_tokens }
+    );
 
-    const rawText = await upstream.text();
-    let data;
+    let data = null;
     try {
-      data = JSON.parse(rawText);
+      data = JSON.parse(upstream.text);
     } catch {
       data = null;
     }
 
     if (!upstream.ok) {
-      return res.status(upstream.status).json({
+      return res.status(upstream.status || 502).json({
         error: "SkoleGPT upstream error",
         status: upstream.status,
-        details: data || rawText,
+        details: data || upstream.text,
       });
     }
 
-    // Robust extraction across common formats
     const extracted =
       (data?.choices?.[0]?.message?.content ??
         data?.choices?.[0]?.delta?.content ??
@@ -57,10 +86,9 @@ export default async function handler(req, res) {
         "").toString().trim();
 
     if (!extracted) {
-      // Fail loud so you see it immediately in the UI
       return res.status(502).json({
         error: "Empty completion text from SkoleGPT",
-        details: data || rawText,
+        details: data || upstream.text,
       });
     }
 
