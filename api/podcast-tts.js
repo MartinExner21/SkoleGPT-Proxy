@@ -1,4 +1,4 @@
-// /api/podcast-tts.js  (Vercel) — NO fetch() (uses https.request)
+// /api/podcast-tts.js — ElevenLabs TTS for Speaker A/B (requires env vars)
 
 import https from "https";
 import { URL } from "url";
@@ -14,6 +14,7 @@ function postJsonForBinary(urlString, headers, bodyObj) {
     headers: {
       "Content-Type": "application/json",
       "Content-Length": Buffer.byteLength(body),
+      Accept: "audio/mpeg",
       ...headers,
     },
   };
@@ -25,9 +26,10 @@ function postJsonForBinary(urlString, headers, bodyObj) {
       res.on("end", () => {
         const buf = Buffer.concat(chunks);
         resolve({
-          ok: res.statusCode >= 200 && res.statusCode < 300,
-          status: res.statusCode,
+          ok: (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300,
+          status: res.statusCode || 0,
           buffer: buf,
+          headers: res.headers || {},
         });
       });
     });
@@ -83,7 +85,7 @@ export default async function handler(req, res) {
     );
 
     if (!upstream.ok) {
-      const details = upstream.buffer.toString("utf8");
+      const details = upstream.buffer.toString("utf8").slice(0, 2000);
       return res.status(upstream.status || 502).json({
         error: "ElevenLabs upstream error",
         status: upstream.status,
