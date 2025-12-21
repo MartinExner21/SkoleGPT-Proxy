@@ -1,4 +1,29 @@
-// /api/podcast-chat.js — adapts OpenAI-style messages[] to /api/skolegpt { userContent: ... }
+// /api/podcast-chat.js — adapts messages[] -> /api/skolegpt { userContent } and parses SSE delta stream
+
+function extractTextFromSSE(sseText) {
+  // SSE lines look like: data: {"delta":"Jeg"}  ... data: [DONE]
+  const lines = sseText.split(/\r?\n/);
+  let out = "";
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+
+    const payload = trimmed.slice(5).trim(); // after "data:"
+    if (!payload || payload === "[DONE]") continue;
+
+    try {
+      const obj = JSON.parse(payload);
+      if (typeof obj?.delta === "string") out += obj.delta;
+      else if (typeof obj?.text === "string") out += obj.text;
+      else if (typeof obj?.content === "string") out += obj.content;
+    } catch {
+      // ignore non-JSON SSE lines
+    }
+  }
+
+  return out.trim();
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -12,7 +37,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing messages[]" });
     }
 
-    // Convert messages -> a single userContent string (compatible with /api/skolegpt)
+    // Convert messages -> userContent for /api/skolegpt
     const systemParts = messages
       .filter((m) => m?.role === "system" && typeof m?.content === "string")
       .map((m) => m.content.trim())
@@ -52,14 +77,13 @@ export default async function handler(req, res) {
 
     const headers = {
       "Content-Type": "application/json",
-      Accept: "application/json",
+      Accept: "text/event-stream, application/json",
     };
 
     const authToSend = incomingAuth || serverAuth;
     if (authToSend) headers.Authorization = authToSend;
     if (incomingApiKey) headers["x-api-key"] = incomingApiKey;
 
-    // /api/skolegpt expects userContent (per your error)
     const upstream = await fetch(FORWARD_URL, {
       method: "POST",
       headers,
@@ -71,12 +95,6 @@ export default async function handler(req, res) {
     });
 
     const upstreamText = await upstream.text();
-    let upstreamJson = null;
-    try {
-      upstreamJson = JSON.parse(upstreamText);
-    } catch {
-      upstreamJson = null;
-    }
 
     if (!upstream.ok) {
       return res.status(502).json({
@@ -85,27 +103,37 @@ export default async function handler(req, res) {
         upstreamStatus: upstream.status,
         upstreamContentType: upstream.headers.get("content-type") || "(missing)",
         upstreamBodyPreview: upstreamText.slice(0, 1200),
-        upstreamJson,
       });
     }
 
-    // Try extract "text" from common proxy shapes
-    const extracted =
-      (upstreamJson?.text ??
-        upstreamJson?.message ??
-        upstreamJson?.content ??
-        upstreamJson?.result ??
-        upstreamJson?.output ??
-        upstreamJson?.choices?.[0]?.message?.content ??
-        "").toString().trim();
+    // 1) Try JSON (non-stream response)
+    let extracted = "";
+    try {
+      const j = JSON.parse(upstreamText);
+      extracted =
+        (j?.text ??
+          j?.message ??
+          j?.content ??
+          j?.result ??
+          j?.output ??
+          j?.choices?.[0]?.message?.content ??
+          "").toString().trim();
+    } catch {
+      extracted = "";
+    }
+
+    // 2) If not JSON, treat as SSE delta stream
+    if (!extracted) {
+      extracted = extractTextFromSSE(upstreamText);
+    }
 
     if (!extracted) {
       return res.status(502).json({
         error: "Forwarded endpoint returned no completion text",
         forwardUrl: FORWARD_URL,
         upstreamStatus: upstream.status,
+        upstreamContentType: upstream.headers.get("content-type") || "(missing)",
         upstreamBodyPreview: upstreamText.slice(0, 1200),
-        upstreamJson,
       });
     }
 
