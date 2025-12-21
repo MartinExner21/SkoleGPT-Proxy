@@ -1,4 +1,4 @@
-// /api/podcast-tts.js — ElevenLabs TTS for Speaker A/B (requires env vars)
+// /api/podcast-tts.js — ElevenLabs TTS (env names aligned with project)
 
 import https from "https";
 import { URL } from "url";
@@ -29,7 +29,6 @@ function postJsonForBinary(urlString, headers, bodyObj) {
           ok: (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300,
           status: res.statusCode || 0,
           buffer: buf,
-          headers: res.headers || {},
         });
       });
     });
@@ -55,13 +54,15 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing text" });
     }
 
-    const apiKey = process.env.ELEVEN_API_KEY;
-    const voiceA = process.env.ELEVEN_VOICE_ID_A;
-    const voiceB = process.env.ELEVEN_VOICE_ID_B;
+    // ✅ ENV NAMES MATCH YOUR PROJECT
+    const apiKey = process.env.ELEVENLABS_API_KEY;
+    const voiceA = process.env.ELEVENLABS_VOICE_ID_A;
+    const voiceB = process.env.ELEVENLABS_VOICE_ID_B;
 
     if (!apiKey || !voiceA || !voiceB) {
       return res.status(500).json({
-        error: "Missing env ELEVEN_API_KEY / ELEVEN_VOICE_ID_A / ELEVEN_VOICE_ID_B",
+        error:
+          "Missing env ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID_A / ELEVENLABS_VOICE_ID_B",
       });
     }
 
