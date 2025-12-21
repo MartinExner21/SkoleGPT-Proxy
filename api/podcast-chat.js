@@ -1,4 +1,4 @@
-// /api/podcast-chat.js  (Vercel) — NO fetch() (uses https.request)
+// /api/podcast-chat.js (Vercel) — FIXED TLS: uses https://skolegpt.dk (matches cert)
 
 import https from "https";
 import { URL } from "url";
@@ -9,7 +9,7 @@ function postJson(urlString, headers, bodyObj) {
 
   const options = {
     method: "POST",
-    hostname: url.hostname,
+    hostname: url.hostname, // "skolegpt.dk"
     path: url.pathname + (url.search || ""),
     headers: {
       "Content-Type": "application/json",
@@ -56,7 +56,7 @@ export default async function handler(req, res) {
     }
 
     const upstream = await postJson(
-      "https://api.skolegpt.dk/v1/chat/completions",
+      "https://skolegpt.dk/v1/chat/completions",
       { Authorization: `Bearer ${apiKey}` },
       { messages, temperature, max_tokens }
     );
