@@ -1,4 +1,4 @@
-// /api/podcast-chat.js (Vercel) — FIX: call chat.skolegpt.dk (NOT skolegpt.dk / simply.com WAF)
+// /api/podcast-chat.js (Vercel) — DEBUG MODE + robust https
 
 import https from "https";
 import { URL } from "url";
@@ -9,13 +9,13 @@ function postJson(urlString, headers, bodyObj) {
 
   const options = {
     method: "POST",
-    hostname: url.hostname, // chat.skolegpt.dk
+    hostname: url.hostname,
     path: url.pathname + (url.search || ""),
     headers: {
       "Content-Type": "application/json",
       "Content-Length": Buffer.byteLength(body),
       Accept: "application/json",
-      "User-Agent": "skolegpt-podcast-proxy/1.0",
+      "User-Agent": "Mozilla/5.0 (compatible; skolegpt-podcast-proxy/1.0)",
       ...headers,
     },
   };
@@ -27,8 +27,8 @@ function postJson(urlString, headers, bodyObj) {
       res.on("data", (chunk) => (data += chunk));
       res.on("end", () => {
         resolve({
-          ok: res.statusCode >= 200 && res.statusCode < 300,
-          status: res.statusCode,
+          status: res.statusCode || 0,
+          headers: res.headers || {},
           text: data,
         });
       });
@@ -57,40 +57,60 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Missing env SKOLEGPT_API_KEY" });
     }
 
+    // IMPORTANT: set THIS to the exact API host once identified
+    const upstreamUrl = "https://api.skolegpt.dk/v1/chat/completions";
+
     const upstream = await postJson(
-      "https://chat.skolegpt.dk/v1/chat/completions",
+      upstreamUrl,
       { Authorization: `Bearer ${apiKey}` },
       { messages, temperature, max_tokens }
     );
 
+    const ct = (upstream.headers["content-type"] || "").toString();
+
+    // Try parse JSON if it looks like JSON
     let data = null;
-    try {
-      data = JSON.parse(upstream.text);
-    } catch {
-      data = null;
+    if (ct.includes("application/json") || upstream.text.trim().startsWith("{")) {
+      try {
+        data = JSON.parse(upstream.text);
+      } catch {
+        data = null;
+      }
     }
 
-    if (!upstream.ok) {
-      return res.status(upstream.status || 502).json({
-        error: "SkoleGPT upstream error",
-        status: upstream.status,
-        details: data || upstream.text,
+    // If we didn't get JSON, return debug info (THIS is what you need to see)
+    if (!ct.includes("application/json")) {
+      return res.status(502).json({
+        error: "Upstream did not return JSON (likely webapp/WAF/redirect).",
+        upstreamUrl,
+        upstreamStatus: upstream.status,
+        upstreamContentType: ct || "(missing)",
+        upstreamPreview: upstream.text.slice(0, 800),
+      });
+    }
+
+    // JSON but could still be error
+    if (upstream.status < 200 || upstream.status >= 300) {
+      return res.status(upstream.status).json({
+        error: "SkoleGPT upstream error (JSON)",
+        upstreamUrl,
+        upstreamStatus: upstream.status,
+        details: data || upstream.text.slice(0, 800),
       });
     }
 
     const extracted =
       (data?.choices?.[0]?.message?.content ??
-        data?.choices?.[0]?.delta?.content ??
         data?.message?.content ??
         data?.text ??
-        data?.output_text ??
-        data?.output ??
         "").toString().trim();
 
     if (!extracted) {
       return res.status(502).json({
-        error: "Empty completion text from SkoleGPT",
-        details: data || upstream.text,
+        error: "Empty completion text from upstream JSON",
+        upstreamUrl,
+        upstreamStatus: upstream.status,
+        details: data,
       });
     }
 
