@@ -1,4 +1,4 @@
-// /api/podcast-chat.js — forward to existing endpoint + forward auth headers + debug errors
+// /api/podcast-chat.js — forward to existing working route: /api/skolegpt
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -12,19 +12,14 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing messages[]" });
     }
 
-    // IMPORTANT: this must be your working endpoint used by the læsehjælper
-    const FORWARD_URL = "https://skolegpt-proxy.vercel.app/api/chat";
+    const FORWARD_URL = "https://skolegpt-proxy.vercel.app/api/skolegpt";
 
-    // Forward headers that might be required by /api/chat
     const incomingAuth =
       (req.headers.authorization || req.headers.Authorization || "").toString();
 
     const incomingApiKey =
-      (req.headers["x-api-key"] || req.headers["X-Api-Key"] || "").toString();
+      (req.headers["x-api-key"] || req.headers["X-API-KEY"] || "").toString();
 
-    // If /api/chat expects Authorization and client didn't send it,
-    // we can provide server-side key (if you use it that way).
-    // If your /api/chat does NOT use Authorization, it will just ignore it.
     const serverAuth = process.env.SKOLEGPT_API_KEY
       ? `Bearer ${process.env.SKOLEGPT_API_KEY}`
       : "";
@@ -34,11 +29,8 @@ export default async function handler(req, res) {
       Accept: "application/json",
     };
 
-    // Prefer incoming auth, else server auth
     const authToSend = incomingAuth || serverAuth;
     if (authToSend) headers.Authorization = authToSend;
-
-    // Forward x-api-key if present
     if (incomingApiKey) headers["x-api-key"] = incomingApiKey;
 
     const upstream = await fetch(FORWARD_URL, {
