@@ -1,4 +1,4 @@
-// /api/podcast-chat.js — forwards to existing working endpoint in SAME Vercel project
+// /api/podcast-chat.js — forward to existing endpoint + forward auth headers + debug errors
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -12,44 +12,74 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing messages[]" });
     }
 
-    // IMPORTANT:
-    // This must be the endpoint your existing “læsehjælper” already uses successfully.
+    // IMPORTANT: this must be your working endpoint used by the læsehjælper
     const FORWARD_URL = "https://skolegpt-proxy.vercel.app/api/chat";
+
+    // Forward headers that might be required by /api/chat
+    const incomingAuth =
+      (req.headers.authorization || req.headers.Authorization || "").toString();
+
+    const incomingApiKey =
+      (req.headers["x-api-key"] || req.headers["X-Api-Key"] || "").toString();
+
+    // If /api/chat expects Authorization and client didn't send it,
+    // we can provide server-side key (if you use it that way).
+    // If your /api/chat does NOT use Authorization, it will just ignore it.
+    const serverAuth = process.env.SKOLEGPT_API_KEY
+      ? `Bearer ${process.env.SKOLEGPT_API_KEY}`
+      : "";
+
+    const headers = {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+
+    // Prefer incoming auth, else server auth
+    const authToSend = incomingAuth || serverAuth;
+    if (authToSend) headers.Authorization = authToSend;
+
+    // Forward x-api-key if present
+    if (incomingApiKey) headers["x-api-key"] = incomingApiKey;
 
     const upstream = await fetch(FORWARD_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      // We forward the exact same OpenAI-style payload we already build:
+      headers,
       body: JSON.stringify({ messages, temperature, max_tokens }),
     });
 
-    const text = await upstream.text();
-    let data = null;
+    const upstreamText = await upstream.text();
+    let upstreamJson = null;
     try {
-      data = JSON.parse(text);
+      upstreamJson = JSON.parse(upstreamText);
     } catch {
-      data = null;
+      upstreamJson = null;
     }
 
     if (!upstream.ok) {
-      return res.status(upstream.status).json({
+      return res.status(502).json({
         error: "Upstream (forwarded) error",
-        status: upstream.status,
-        details: data || text,
+        forwardUrl: FORWARD_URL,
+        upstreamStatus: upstream.status,
+        upstreamContentType: upstream.headers.get("content-type") || "(missing)",
+        upstreamBodyPreview: upstreamText.slice(0, 1200),
+        upstreamJson,
       });
     }
 
     const extracted =
-      (data?.choices?.[0]?.message?.content ??
-        data?.message?.content ??
-        data?.text ??
-        data?.output ??
+      (upstreamJson?.choices?.[0]?.message?.content ??
+        upstreamJson?.message?.content ??
+        upstreamJson?.text ??
+        upstreamJson?.output ??
         "").toString().trim();
 
     if (!extracted) {
       return res.status(502).json({
-        error: "Empty completion text from forwarded endpoint",
-        details: data || text,
+        error: "Forwarded endpoint returned no completion text",
+        forwardUrl: FORWARD_URL,
+        upstreamStatus: upstream.status,
+        upstreamBodyPreview: upstreamText.slice(0, 1200),
+        upstreamJson,
       });
     }
 
