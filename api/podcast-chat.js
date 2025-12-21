@@ -1,4 +1,4 @@
-// /api/podcast-chat.js (Vercel) — FIXED TLS: uses https://skolegpt.dk (matches cert)
+// /api/podcast-chat.js (Vercel) — FIX: call chat.skolegpt.dk (NOT skolegpt.dk / simply.com WAF)
 
 import https from "https";
 import { URL } from "url";
@@ -9,11 +9,13 @@ function postJson(urlString, headers, bodyObj) {
 
   const options = {
     method: "POST",
-    hostname: url.hostname, // "skolegpt.dk"
+    hostname: url.hostname, // chat.skolegpt.dk
     path: url.pathname + (url.search || ""),
     headers: {
       "Content-Type": "application/json",
       "Content-Length": Buffer.byteLength(body),
+      Accept: "application/json",
+      "User-Agent": "skolegpt-podcast-proxy/1.0",
       ...headers,
     },
   };
@@ -56,7 +58,7 @@ export default async function handler(req, res) {
     }
 
     const upstream = await postJson(
-      "https://skolegpt.dk/v1/chat/completions",
+      "https://chat.skolegpt.dk/v1/chat/completions",
       { Authorization: `Bearer ${apiKey}` },
       { messages, temperature, max_tokens }
     );
