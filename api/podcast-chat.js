@@ -1,4 +1,4 @@
-// /api/podcast-chat.js — forward to existing working route: /api/skolegpt
+// /api/podcast-chat.js — adapts OpenAI-style messages[] to /api/skolegpt { userContent: ... }
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -11,6 +11,32 @@ export default async function handler(req, res) {
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: "Missing messages[]" });
     }
+
+    // Convert messages -> a single userContent string (compatible with /api/skolegpt)
+    const systemParts = messages
+      .filter((m) => m?.role === "system" && typeof m?.content === "string")
+      .map((m) => m.content.trim())
+      .filter(Boolean);
+
+    const convoParts = messages
+      .filter((m) => m?.role !== "system" && typeof m?.content === "string")
+      .map((m) => {
+        const role = (m.role || "user").toString();
+        const label =
+          role === "assistant" ? "ASSISTANT" :
+          role === "user" ? "USER" :
+          role.toUpperCase();
+        return `${label}: ${m.content.trim()}`;
+      })
+      .filter(Boolean);
+
+    const userContent = [
+      systemParts.length ? `SYSTEM:\n${systemParts.join("\n\n")}` : "",
+      convoParts.length ? `CONVERSATION:\n${convoParts.join("\n")}` : "",
+      `CONSTRAINTS:\nSvar på dansk. Max 2 sætninger. Kort, afbrydende, lidt uenig.`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
 
     const FORWARD_URL = "https://skolegpt-proxy.vercel.app/api/skolegpt";
 
@@ -33,10 +59,15 @@ export default async function handler(req, res) {
     if (authToSend) headers.Authorization = authToSend;
     if (incomingApiKey) headers["x-api-key"] = incomingApiKey;
 
+    // /api/skolegpt expects userContent (per your error)
     const upstream = await fetch(FORWARD_URL, {
       method: "POST",
       headers,
-      body: JSON.stringify({ messages, temperature, max_tokens }),
+      body: JSON.stringify({
+        userContent,
+        temperature,
+        max_tokens,
+      }),
     });
 
     const upstreamText = await upstream.text();
@@ -58,11 +89,14 @@ export default async function handler(req, res) {
       });
     }
 
+    // Try extract "text" from common proxy shapes
     const extracted =
-      (upstreamJson?.choices?.[0]?.message?.content ??
-        upstreamJson?.message?.content ??
-        upstreamJson?.text ??
+      (upstreamJson?.text ??
+        upstreamJson?.message ??
+        upstreamJson?.content ??
+        upstreamJson?.result ??
         upstreamJson?.output ??
+        upstreamJson?.choices?.[0]?.message?.content ??
         "").toString().trim();
 
     if (!extracted) {
