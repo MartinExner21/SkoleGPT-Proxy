@@ -1,139 +1,72 @@
-// api/skolegpt.js  (STREAMING proxy -> SSE)
-// Returnerer text/event-stream med deltas:  data: {"delta":"..."}  og til sidst data: [DONE]
-
-const INIT_PROMPT = `Du er SkoleGPT og skal hjælpe en ordblind elev eller voksen med at forstå en tekst eller svare på et spørgsmål.
-
-Når du får et spørgsmål samt evt. markeret tekst og/eller hele sidens indhold:
-1) Forklar i et enkelt, mundtligt dansk sprog.
-2) Brug korte og tydelige sætninger.
-3) Undgå svære fagord, eller forklar dem.
-4) Behold hovedbetydningen.
-5) Tal direkte til brugeren.
-
-VIGTIGT:
-- Start ALDRIG to svar på samme måde.
-- Variér åbningssætningen med små venlige twists, men hold sproget neutralt og let at forstå.
-- Svar som standard kort: 4-8 korte linjer. Afslut evt. med "Vil du have en mere detaljeret forklaring?"
-Svar altid på dansk.`;
-
 export default async function handler(req, res) {
-  // CORS
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
 
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  const { systemPrompt, userPrompt } = req.body || {};
 
-  const apiKey = process.env.SKOLEGPT_API_KEY;
-  if (!apiKey) return res.status(500).json({ error: "Missing SKOLEGPT_API_KEY on server" });
-
-  const { userContent } = req.body || {};
-  if (!userContent || !String(userContent).trim()) {
-    return res.status(400).json({ error: "Missing 'userContent' in body" });
+  if (!userPrompt) {
+    return res.status(400).json({ error: "Missing userPrompt" });
   }
 
   try {
-    const upstream = await fetch("https://llm.dbc.dk/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey}`,
-        "Accept": "text/event-stream"
-      },
-      body: JSON.stringify({
-        messages: [
-          { role: "system", content: INIT_PROMPT },
-          { role: "user", content: String(userContent) }
-        ],
-        stream: true,
-        model: "skolegpt-v3",
-        temperature: 0.6,
-        top_p: 0.9,
-        presence_penalty: 0,
-        frequency_penalty: 0
-      })
-    });
+    const SKOLEGPT_API_URL = process.env.SKOLEGPT_API_URL;
+    const SKOLEGPT_API_KEY = process.env.SKOLEGPT_API_KEY; // optional
 
-    if (!upstream.ok || !upstream.body) {
-      const txt = await upstream.text().catch(() => "");
-      return res.status(502).json({
-        error: "SkoleGPT upstream error",
-        status: upstream.status,
-        details: txt
-      });
+    if (!SKOLEGPT_API_URL) {
+      return res.status(500).json({ error: "SKOLEGPT_API_URL not set" });
     }
 
-    // SSE response til klienten
-    res.statusCode = 200;
-    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
+    const headers = { "Content-Type": "application/json" };
+    if (SKOLEGPT_API_KEY) {
+      headers["Authorization"] = SKOLEGPT_API_KEY.startsWith("Bearer ")
+        ? SKOLEGPT_API_KEY
+        : `Bearer ${SKOLEGPT_API_KEY}`;
+    }
 
-    // Helper: skriv SSE-linje
-    const writeDelta = (delta) => {
-      // JSON-escape via stringify
-      res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+    // Tilpas payload hvis din SkoleGPT API ikke er chat-completions-style
+    const payload = {
+      messages: [
+        {
+          role: "system",
+          content: systemPrompt || "Du er SkoleGPT – en dansk læringsassistent."
+        },
+        {
+          role: "user",
+          content: userPrompt
+        }
+      ]
     };
 
-    const reader = upstream.body.getReader();
-    const decoder = new TextDecoder("utf-8");
+const r = await fetch(SKOLEGPT_API_URL, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
 
-    let buffer = "";
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-
-      // upstream kommer som SSE-linjer; vi splitter på newline
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() || "";
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-
-        const dataPart = trimmed.slice("data:".length).trim();
-        if (!dataPart) continue;
-
-        if (dataPart === "[DONE]") {
-          res.write(`data: [DONE]\n\n`);
-          res.end();
-          return;
-        }
-
-        // parse upstream chunk JSON
-        try {
-          const obj = JSON.parse(dataPart);
-          const choice = obj?.choices?.[0];
-          const piece =
-            choice?.delta?.content ??
-            choice?.message?.content ??
-            "";
-
-          if (piece) writeDelta(piece);
-        } catch {
-          // ignore parse fejl
-        }
-      }
+    if (!r.ok) {
+      const t = await r.text().catch(() => "");
+      return res.status(r.status).json({ error: t || r.statusText });
     }
 
-    // fallback hvis upstream sluttede uden [DONE]
-    res.write(`data: [DONE]\n\n`);
-    res.end();
-  } catch (err) {
-    console.error("SkoleGPT streaming proxy error:", err);
-    try {
-      res.status(500).json({ error: "Internal SkoleGPT proxy error" });
-    } catch {
-      // hvis headers allerede sendt
-      try {
-        res.write(`data: ${JSON.stringify({ error: "Internal error" })}\n\n`);
-        res.write(`data: [DONE]\n\n`);
-        res.end();
-      } catch {}
-    }
+    const data = await r.json();
+
+    const answer =
+      data?.choices?.[0]?.message?.content ??
+      data?.answer ??
+      data?.message ??
+      "";
+
+    return res.status(200).json({ answer });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
   }
+}
+
+/**
+ * Minimal “safety” wrapper to ensure SKOLEGPT_API_URL is a string.
+ * You can remove this if you prefer.
+ */
+function SKOOLEGPT_API_URL_SAFE(url) {
+  return typeof url === "string" ? url : "";
 }
