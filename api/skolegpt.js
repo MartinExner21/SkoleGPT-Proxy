@@ -1,4 +1,14 @@
 export default async function handler(req, res) {
+  // --- CORS ---
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  // Preflight
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
@@ -24,24 +34,22 @@ export default async function handler(req, res) {
         : `Bearer ${SKOLEGPT_API_KEY}`;
     }
 
-    // Tilpas payload hvis din SkoleGPT API ikke er chat-completions-style
     const payload = {
       messages: [
         {
           role: "system",
-          content: systemPrompt || "Du er SkoleGPT – en dansk læringsassistent."
+          content:
+            systemPrompt ||
+            "Du er SkoleGPT – en dansk læringsassistent. Svar klart og pædagogisk."
         },
-        {
-          role: "user",
-          content: userPrompt
-        }
+        { role: "user", content: userPrompt }
       ]
     };
 
-const r = await fetch(SKOLEGPT_API_URL, {
+    const r = await fetch(SKOLEGPT_API_URL, {
       method: "POST",
       headers,
-      body: JSON.stringify(payload),
+      body: JSON.stringify(payload)
     });
 
     if (!r.ok) {
@@ -63,10 +71,3 @@ const r = await fetch(SKOLEGPT_API_URL, {
   }
 }
 
-/**
- * Minimal “safety” wrapper to ensure SKOLEGPT_API_URL is a string.
- * You can remove this if you prefer.
- */
-function SKOOLEGPT_API_URL_SAFE(url) {
-  return typeof url === "string" ? url : "";
-}
